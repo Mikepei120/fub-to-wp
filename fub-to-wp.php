@@ -7028,7 +7028,7 @@ function fub_to_wp_init_update_checker() {
     
     // Use the factory class with full namespace
     $updateChecker = YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
-        'https://github.com/YOUR_USERNAME/fub-to-wp',
+        'https://github.com/Mikepei120/fub-to-wp',
         FUB_PLUGIN_FILE,
         'fub-to-wp'
     );
