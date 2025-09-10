@@ -7438,6 +7438,11 @@ add_action('plugins_loaded', 'fub_to_wp_init');
 
 // Initialize Auto-Update Checker
 function fub_to_wp_init_update_checker() {
+    // Only initialize if WordPress is fully loaded
+    if (!did_action('init')) {
+        return;
+    }
+    
     // Only initialize if plugin update checker exists
     if (!file_exists(FUB_PLUGIN_DIR . 'plugin-update-checker/plugin-update-checker.php')) {
         return;
@@ -7492,5 +7497,5 @@ function fub_set_github_token($token) {
     return true;
 }
 
-// Initialize update checker after plugins are loaded
-add_action('plugins_loaded', 'fub_to_wp_init_update_checker');
+// Initialize update checker after WordPress initialization is complete
+add_action('init', 'fub_to_wp_init_update_checker', 20);
