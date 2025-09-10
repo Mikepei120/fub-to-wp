@@ -4,7 +4,7 @@ Tags: follow-up-boss, real-estate, crm, lead-capture, forms
 Requires at least: 5.6
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 1.0.1
+Stable tag: 1.0.2
 License: GPL v2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -65,6 +65,11 @@ Lead capture will be blocked until you renew your subscription.
 5. Lead analytics
 
 == Changelog ==
+
+= 1.0.2 =
+* FIXED: Action Scheduler timing issue - Resolved 'as_next_scheduled_action called incorrectly' notice
+* IMPROVED: Plugin initialization - Changed autoupdater hook from 'plugins_loaded' to 'init'
+* ENHANCED: WordPress compatibility - Added proper initialization checks
 
 = 1.0.1 =
 * IMPROVED: Updated plugin-update-checker to latest version
