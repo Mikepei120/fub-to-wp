@@ -7447,18 +7447,19 @@ function fub_to_wp_init_update_checker() {
     
     // Use the factory class with full namespace
     $updateChecker = YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
-        'https://github.com/Mikepei120/fub-to-wp',
+        'https://github.com/Mikepei120/fub-to-wp/',
         FUB_PLUGIN_FILE,
         'fub-to-wp'
     );
     
-    // Set the branch that contains the stable release
-    $updateChecker->setBranch('main');
+    // Set the branch that contains the stable release (using master branch)
+    $updateChecker->setBranch('master');
     
-    // Public repository - no authentication needed
-    
-    // Enable GitHub release assets (ZIP files)
+    // Enable GitHub release assets (ZIP files) for release-based updates
     $updateChecker->getVcsApi()->enableReleaseAssets();
+    
+    // Optional: Add license checking or other features
+    // $updateChecker->addQueryArgFilter(array($this, 'filterUpdateRequest'));
 }
 
 // Secure GitHub token management for private repository access
