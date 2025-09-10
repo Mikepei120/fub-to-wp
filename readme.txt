@@ -4,7 +4,7 @@ Tags: follow-up-boss, real-estate, crm, lead-capture, forms
 Requires at least: 5.6
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 1.0.0
+Stable tag: 1.0.1
 License: GPL v2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -66,7 +66,13 @@ Lead capture will be blocked until you renew your subscription.
 
 == Changelog ==
 
-= 3.2.0 =
+= 1.0.1 =
+* IMPROVED: Updated plugin-update-checker to latest version
+* FIXED: GitHub autoupdater configuration for proper release detection
+* FIXED: Branch name correction for stable updates
+* ENHANCED: Release asset support for automatic ZIP downloads
+
+= 1.0.0 =
 * NEW: Automatic update system via GitHub releases
 * NEW: Professional auto-update notifications in WordPress admin
 * NEW: GitHub integration for version control and release management

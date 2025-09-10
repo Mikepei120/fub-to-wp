@@ -3,7 +3,7 @@
  * Plugin Name: FUB to WP
  * Plugin URI: https://fubtowordpress.com
  * Description: Complete Follow Up Boss to WordPress integration with FUB API key validation, Stripe subscription, multi-site license sharing, local WordPress settings storage, and automatic pixel sync.
- * Version: 1.0.0
+ * Version: 1.0.1
  * Author: FUB to WP Team
  * License: GPL v2 or later
  * Requires at least: 5.6
