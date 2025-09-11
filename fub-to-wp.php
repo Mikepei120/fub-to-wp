@@ -3,7 +3,7 @@
  * Plugin Name: FUB to WP
  * Plugin URI: https://fubtowordpress.com
  * Description: Complete Follow Up Boss to WordPress integration with FUB API key validation, Stripe subscription, multi-site license sharing, local WordPress settings storage, and automatic pixel sync.
- * Version: 1.0.2
+ * Version: 1.0.3
  * Author: FUB to WP Team
  * License: GPL v2 or later
  * Requires at least: 5.6
@@ -27,7 +27,7 @@ if (version_compare(PHP_VERSION, '7.4', '<')) {
 
 // Define plugin constants
 if (!defined('FUB_VERSION')) {
-    define('FUB_VERSION', '4.3.0');
+    define('FUB_VERSION', '4.3.1');
     define('FUB_PLUGIN_FILE', __FILE__);
     define('FUB_PLUGIN_DIR', plugin_dir_path(__FILE__));
     define('FUB_PLUGIN_URL', plugin_dir_url(__FILE__));
@@ -753,8 +753,10 @@ class FUB_OAuth_Manager {
         return array('success' => false, 'error' => 'No tokens found');
     }
     
-    public function refresh_access_token() {
-        $refresh_token = get_option('fub_oauth_refresh_token');
+    public function refresh_access_token($refresh_token = null) {
+        if (!$refresh_token) {
+            $refresh_token = get_option('fub_oauth_refresh_token');
+        }
         if (!$refresh_token) {
             return array('success' => false, 'error' => 'No refresh token available');
         }
@@ -842,16 +844,21 @@ class FUB_OAuth_Manager {
         
         $token_data = $tokens_response['data'];
         
-        // Check if token is expired
-        if (isset($token_data['expires_at']) && time() > strtotime($token_data['expires_at'])) {
+        // Check if token is expired or will expire in the next 5 minutes (300 seconds)
+        $expires_timestamp = isset($token_data['expires_at']) ? strtotime($token_data['expires_at']) : time() + 3600;
+        $buffer_time = 300; // 5 minutes buffer
+        
+        if (time() + $buffer_time >= $expires_timestamp) {
+            error_log('🔐 OAuth: Token expires soon or expired, attempting refresh for account: ' . $account_id);
             // Try to refresh token
             if (isset($token_data['refresh_token'])) {
                 $refresh_result = $this->refresh_access_token($token_data['refresh_token']);
                 if ($refresh_result['success']) {
+                    error_log('🔐 OAuth: Token successfully refreshed for account: ' . $account_id);
                     return $refresh_result['access_token'];
                 }
             }
-            error_log('🔐 OAuth: Token expired and refresh failed for account: ' . $account_id);
+            error_log('🔐 OAuth: Token expired/expires soon and refresh failed for account: ' . $account_id);
             return false;
         }
         
@@ -921,7 +928,7 @@ class FUB_OAuth_Manager {
         return array('success' => false, 'error' => $data['message'] ?? 'Failed to get account info');
     }
     
-    public function make_authenticated_request($url, $method = 'GET', $data = null) {
+    public function make_authenticated_request($url, $method = 'GET', $data = null, $retry_count = 0) {
         $access_token = $this->get_valid_access_token();
         if (!$access_token) {
             return array('success' => false, 'error' => 'No valid access token available');
@@ -949,6 +956,26 @@ class FUB_OAuth_Manager {
         $status_code = wp_remote_retrieve_response_code($response);
         $body = wp_remote_retrieve_body($response);
         $decoded_body = json_decode($body, true);
+        
+        // If we got a 401 (Unauthorized) and haven't retried yet, try to refresh token and retry
+        if ($status_code === 401 && $retry_count === 0) {
+            error_log('🔐 OAuth: Received 401 error, attempting token refresh and retry');
+            
+            // Force token refresh by clearing any cached tokens and getting new one
+            $account_id = get_option('fub_account_id');
+            if ($account_id) {
+                $tokens_response = $this->backend_api->get_oauth_tokens($account_id);
+                if ($tokens_response['success'] && isset($tokens_response['data']['refresh_token'])) {
+                    $refresh_result = $this->refresh_access_token($tokens_response['data']['refresh_token']);
+                    if ($refresh_result['success']) {
+                        error_log('🔐 OAuth: Token refreshed successfully, retrying request');
+                        // Retry the request with new token (recursive call with retry_count = 1)
+                        return $this->make_authenticated_request($url, $method, $data, 1);
+                    }
+                }
+            }
+            error_log('🔐 OAuth: Token refresh failed, cannot retry request');
+        }
         
         if ($status_code >= 200 && $status_code < 300) {
             return array('success' => true, 'data' => $decoded_body);
@@ -4190,9 +4217,11 @@ class FUB_Integration_SaaS {
         add_action('wp_ajax_fub_sync_tags', array($this, 'ajax_sync_tags'));
         add_action('wp_ajax_fub_get_users', array($this, 'ajax_get_users'));
         add_action('wp_ajax_fub_test_tags_connection', array($this, 'ajax_test_tags_connection'));
+        add_action('wp_ajax_fub_retry_failed_leads', array($this, 'ajax_retry_failed_leads'));
         
         // License validation on admin pages
         add_action('admin_init', array($this->license_manager, 'validate_license_on_load'));
+        
         
         // Activation/Deactivation hooks are registered outside this class
         
@@ -4880,8 +4909,8 @@ class FUB_Integration_SaaS {
             // Get stats with error handling
             if (!$db_error) {
                 $total_leads = $wpdb->get_var("SELECT COUNT(*) FROM $table_name") ?: 0;
-                $sent_leads = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 'sent'") ?: 0;
-                $failed_leads = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE status = 'failed'") ?: 0;
+                $sent_leads = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE fub_status = 'sent' OR (fub_status IS NULL AND status = 'sent')") ?: 0;
+                $failed_leads = $wpdb->get_var("SELECT COUNT(*) FROM $table_name WHERE fub_status IN ('failed', 'pending') OR (fub_status IS NULL AND status IN ('failed', 'pending'))") ?: 0;
                 
                 if ($wpdb->last_error) {
                     $db_error = true;
@@ -4926,6 +4955,11 @@ class FUB_Integration_SaaS {
                 <div class="fub-stat-box">
                     <h3>Failed</h3>
                     <span class="fub-stat-number" style="color: #242424;"><?php echo $failed_leads; ?></span>
+                    <?php if ($failed_leads > 0): ?>
+                    <button id="fub-retry-failed" class="button button-primary" style="margin-top: 10px;">
+                        Retry Failed Leads
+                    </button>
+                    <?php endif; ?>
                 </div>
             </div>
             
@@ -4979,6 +5013,43 @@ class FUB_Integration_SaaS {
             </div><!-- .fub-setup-wizard -->
         </div><!-- .wrap -->
         
+        <script type="text/javascript">
+        jQuery(document).ready(function($) {
+            $('#fub-retry-failed').on('click', function() {
+                var $button = $(this);
+                var originalText = $button.text();
+                
+                $button.text('Retrying...').prop('disabled', true);
+                
+                $.ajax({
+                    url: ajaxurl,
+                    type: 'POST',
+                    data: {
+                        action: 'fub_retry_failed_leads',
+                        nonce: '<?php echo wp_create_nonce('fub_admin_nonce'); ?>'
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            alert('✅ Retry completed!\n\n' + 
+                                  'Processed: ' + response.data.processed + ' leads\n' +
+                                  'Successful: ' + response.data.successful + ' leads\n' +
+                                  'Failed: ' + response.data.failed + ' leads');
+                            location.reload(); // Reload to update stats
+                        } else {
+                            alert('❌ Error: ' + response.data);
+                        }
+                    },
+                    error: function() {
+                        alert('❌ Network error occurred. Please try again.');
+                    },
+                    complete: function() {
+                        $button.text(originalText).prop('disabled', false);
+                    }
+                });
+            });
+        });
+        </script>
+        
         <?php
     }
     
@@ -5024,6 +5095,8 @@ class FUB_Integration_SaaS {
     public function deactivate() {
         // Clear cache on deactivation
         $this->clear_all_caches();
+        
+        
         flush_rewrite_rules();
     }
     
@@ -5067,13 +5140,20 @@ class FUB_Integration_SaaS {
             tags text,
             assigned_to varchar(100),
             status varchar(20) DEFAULT 'pending',
+            fub_status varchar(20) DEFAULT 'pending',
+            retry_count int(3) DEFAULT 0,
+            fub_response text,
             custom_fields text,
             created_at datetime DEFAULT CURRENT_TIMESTAMP,
             updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
-            KEY email_idx (email)
+            KEY email_idx (email),
+            KEY fub_status_idx (fub_status)
         ) $charset_collate;";
         dbDelta($sql_leads);
+        
+        // Update existing table structure for retry functionality
+        $this->update_leads_table_for_retry();
         
         // Create fub_tags table
         $tags_table = $wpdb->prefix . 'fub_tags';
@@ -5155,6 +5235,64 @@ class FUB_Integration_SaaS {
     }
     
     /**
+     * Update leads table structure to support retry functionality
+     */
+    private function update_leads_table_for_retry() {
+        global $wpdb;
+        $leads_table = $wpdb->prefix . 'fub_leads';
+        
+        // First check if table exists
+        if ($wpdb->get_var("SHOW TABLES LIKE '$leads_table'") != $leads_table) {
+            error_log("FUB Integration: Table $leads_table does not exist, skipping migration");
+            return;
+        }
+        
+        error_log("FUB Integration: Starting table migration for retry functionality on $leads_table");
+        
+        // Use SHOW COLUMNS instead of INFORMATION_SCHEMA for better compatibility
+        $existing_columns = $wpdb->get_col("SHOW COLUMNS FROM $leads_table");
+        
+        // Check if fub_status column exists
+        if (!in_array('fub_status', $existing_columns)) {
+            $result = $wpdb->query("ALTER TABLE $leads_table ADD COLUMN fub_status varchar(20) DEFAULT 'pending' AFTER status");
+            if ($result === false) {
+                error_log("FUB Integration: ERROR adding fub_status column: " . $wpdb->last_error);
+            } else {
+                $wpdb->query("ALTER TABLE $leads_table ADD INDEX fub_status_idx (fub_status)");
+                error_log("FUB Integration: ✅ Added fub_status column to $leads_table");
+            }
+        } else {
+            error_log("FUB Integration: fub_status column already exists in $leads_table");
+        }
+        
+        // Check if retry_count column exists
+        if (!in_array('retry_count', $existing_columns)) {
+            $result = $wpdb->query("ALTER TABLE $leads_table ADD COLUMN retry_count int(3) DEFAULT 0 AFTER fub_status");
+            if ($result === false) {
+                error_log("FUB Integration: ERROR adding retry_count column: " . $wpdb->last_error);
+            } else {
+                error_log("FUB Integration: ✅ Added retry_count column to $leads_table");
+            }
+        } else {
+            error_log("FUB Integration: retry_count column already exists in $leads_table");
+        }
+        
+        // Check if fub_response column exists
+        if (!in_array('fub_response', $existing_columns)) {
+            $result = $wpdb->query("ALTER TABLE $leads_table ADD COLUMN fub_response text AFTER retry_count");
+            if ($result === false) {
+                error_log("FUB Integration: ERROR adding fub_response column: " . $wpdb->last_error);
+            } else {
+                error_log("FUB Integration: ✅ Added fub_response column to $leads_table");
+            }
+        } else {
+            error_log("FUB Integration: fub_response column already exists in $leads_table");
+        }
+        
+        error_log("FUB Integration: Table migration completed for $leads_table");
+    }
+    
+    /**
      * Check if tables exist and create them if needed
      */
     private function check_and_create_tables() {
@@ -5178,7 +5316,21 @@ class FUB_Integration_SaaS {
         $tags_table = $wpdb->prefix . 'fub_tags';
         if ($wpdb->get_var("SHOW TABLES LIKE '$tags_table'") != $tags_table) {
             $this->create_tables();
+            return;
         }
+        
+        // Always run migration to ensure retry columns exist
+        $this->update_leads_table_for_retry();
+    }
+    
+    /**
+     * Public method to force database migration - can be called manually if needed
+     */
+    public function force_database_migration() {
+        error_log('FUB Integration: Forcing database migration for retry functionality');
+        $this->update_leads_table_for_retry();
+        error_log('FUB Integration: Database migration completed');
+        return array('success' => true, 'message' => 'Database migration completed successfully');
     }
     
     public function ajax_reset_setup() {
@@ -6868,7 +7020,12 @@ class FUB_Integration_SaaS {
                 'first_name' => sanitize_text_field(isset($lead_data['first_name']) ? $lead_data['first_name'] : ''),
                 'last_name' => sanitize_text_field(isset($lead_data['last_name']) ? $lead_data['last_name'] : ''),
                 'phone' => sanitize_text_field(isset($lead_data['phone']) ? $lead_data['phone'] : ''),
+                'message' => sanitize_textarea_field(isset($lead_data['message']) ? $lead_data['message'] : ''),
+                'address' => sanitize_text_field(isset($lead_data['address']) ? $lead_data['address'] : ''),
                 'status' => ($fub_success === true) ? 'sent' : (($fub_success === false) ? 'failed' : 'pending'),
+                'fub_status' => ($fub_success === true) ? 'sent' : (($fub_success === false) ? 'failed' : 'pending'),
+                'retry_count' => ($fub_success === false) ? 1 : 0,
+                'fub_response' => isset($fub_response) ? $fub_response : null,
                 'tags' => json_encode($applied_tags),
                 'custom_fields' => json_encode(array(
                     'source' => 'WordPress Form',
@@ -7399,6 +7556,155 @@ class FUB_Integration_SaaS {
             }
         }
         return sanitize_text_field($_SERVER['REMOTE_ADDR'] ?? '');
+    }
+    
+    /**
+     * AJAX handler for manual retry of failed leads
+     */
+    public function ajax_retry_failed_leads() {
+        // Check nonce
+        if (!wp_verify_nonce($_POST['nonce'], 'fub_admin_nonce')) {
+            wp_send_json_error('Security check failed');
+        }
+        
+        // Check permissions
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        
+        $result = $this->retry_failed_leads();
+        
+        if ($result['success']) {
+            wp_send_json_success($result);
+        } else {
+            wp_send_json_error($result['message']);
+        }
+    }
+    
+    /**
+     * Manual retry of failed leads
+     */
+    public function retry_failed_leads() {
+        global $wpdb;
+        
+        // Check if OAuth is connected
+        if (!$this->oauth_manager->is_connected()) {
+            error_log('🔄 FUB RETRY: OAuth not connected, cannot retry failed leads');
+            return array('success' => false, 'message' => 'OAuth not connected');
+        }
+        
+        // Find leads that haven't been sent to FUB
+        $failed_leads = $wpdb->get_results(
+            "SELECT * FROM " . FUB_LEADS_TABLE . " 
+             WHERE (fub_status IN ('failed', 'pending') OR (fub_status IS NULL AND status IN ('failed', 'pending')))
+             AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)  
+             ORDER BY created_at DESC 
+             LIMIT 10",
+            ARRAY_A
+        );
+        
+        if (empty($failed_leads)) {
+            error_log('🔄 FUB RETRY: No failed leads to retry');
+            return array('success' => true, 'message' => 'No failed leads found', 'processed' => 0);
+        }
+        
+        $retry_count = 0;
+        $success_count = 0;
+        
+        foreach ($failed_leads as $lead) {
+            $retry_count++;
+            
+            error_log("🔄 FUB RETRY: Attempting to retry lead ID: {$lead['id']}, Email: {$lead['email']}");
+            
+            // Prepare lead data for retry
+            $lead_data = array(
+                'email' => $lead['email'],
+                'first_name' => $lead['first_name'],
+                'last_name' => $lead['last_name'],
+                'phone' => $lead['phone'],
+                'message' => $lead['message'],
+                'address' => $lead['address']
+            );
+            
+            // Attempt to send to FUB
+            $fub_result = $this->create_fub_lead($lead_data);
+            
+            if ($fub_result['success']) {
+                // Update lead status to sent
+                $wpdb->update(
+                    FUB_LEADS_TABLE,
+                    array(
+                        'fub_status' => 'sent',
+                        'fub_response' => $fub_result['response'],
+                        'updated_at' => current_time('mysql')
+                    ),
+                    array('id' => $lead['id']),
+                    array('%s', '%s', '%s'),
+                    array('%d')
+                );
+                
+                $success_count++;
+                error_log("🔄 FUB RETRY: ✅ Successfully sent lead ID: {$lead['id']}");
+                
+                // Log activity
+                $this->log_activity('lead_retry', 'lead', $lead['email'], 'success', "Lead successfully retried and sent to FUB");
+                
+            } else {
+                // Update failure count and status
+                $failure_count = intval($lead['retry_count'] ?? 0) + 1;
+                $max_retries = 5; // Maximum number of retry attempts
+                
+                if ($failure_count >= $max_retries) {
+                    // Mark as permanently failed after max retries
+                    $wpdb->update(
+                        FUB_LEADS_TABLE,
+                        array(
+                            'fub_status' => 'permanently_failed',
+                            'retry_count' => $failure_count,
+                            'fub_response' => $fub_result['message'],
+                            'updated_at' => current_time('mysql')
+                        ),
+                        array('id' => $lead['id']),
+                        array('%s', '%d', '%s', '%s'),
+                        array('%d')
+                    );
+                    
+                    error_log("🔄 FUB RETRY: ❌ Lead ID: {$lead['id']} permanently failed after {$failure_count} retries");
+                    $this->log_activity('lead_retry', 'lead', $lead['email'], 'error', "Lead permanently failed after {$failure_count} retries: " . $fub_result['message']);
+                    
+                } else {
+                    // Update retry count and keep status as failed for next attempt
+                    $wpdb->update(
+                        FUB_LEADS_TABLE,
+                        array(
+                            'fub_status' => 'failed',
+                            'retry_count' => $failure_count,
+                            'fub_response' => $fub_result['message'],
+                            'updated_at' => current_time('mysql')
+                        ),
+                        array('id' => $lead['id']),
+                        array('%s', '%d', '%s', '%s'),
+                        array('%d')
+                    );
+                    
+                    error_log("🔄 FUB RETRY: ❌ Lead ID: {$lead['id']} retry {$failure_count} failed: " . $fub_result['message']);
+                    $this->log_activity('lead_retry', 'lead', $lead['email'], 'warning', "Lead retry {$failure_count} failed: " . $fub_result['message']);
+                }
+            }
+            
+            // Small delay between retries to avoid overwhelming the API
+            sleep(1);
+        }
+        
+        error_log("🔄 FUB RETRY: Processed {$retry_count} leads, {$success_count} successful, " . ($retry_count - $success_count) . " failed");
+        
+        return array(
+            'success' => true,
+            'message' => "Processed {$retry_count} leads",
+            'processed' => $retry_count,
+            'successful' => $success_count,
+            'failed' => $retry_count - $success_count
+        );
     }
     
 }
